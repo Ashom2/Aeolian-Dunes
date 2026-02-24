@@ -1,0 +1,232 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#define PI 3.14159265358979323846
+
+//do we need heightMapIn? or is it more efficient to calculate here?
+RWStructuredBuffer<float> heightMapIn;
+//RWStructuredBuffer<float> bedrockMapIn;
+RWStructuredBuffer<float> sandMapIn;
+RWStructuredBuffer<float> heightMapOut;
+RWStructuredBuffer<float> sandMapOut;
+
+RWStructuredBuffer<uint> mutex;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float gridSize;
+
+float slopeThreshold;
+float crestRoughness;
+
+float spreadAmount;
+float spreadAmount2;
+
+float GetHeight(int x, int y)
+{
+    return heightMapIn[y + x * yResolution];
+}
+
+void AddSand(int x, int y, float amount)
+{
+    if (amount >= -sandMapOut[y + x * yResolution])
+    {
+        sandMapOut[y + x * yResolution] += amount;
+        heightMapOut[y + x * yResolution] += amount;
+    }
+    else 
+    {
+        heightMapOut[y + x * yResolution] -= sandMapOut[y + x * yResolution];
+        sandMapOut[y + x * yResolution] = 0;
+    }
+    
+
+    
+    // while (true)
+    // {
+    //     uint original = 1;
+    //     //if mutex = 0, overwrite with 1 and set original to 0
+    //     InterlockedCompareExchange(mutex[y + x * yResolution], 0, 1, original);
+    //     if (original == 0) break;
+    // }
+    // sandMapOut[y + x * yResolution] += amount;
+    // heightMapOut[y + x * yResolution] += amount;
+
+    // uint dummy;
+    // InterlockedExchange(mutex[y + x * yResolution], 0, dummy);
+}
+
+
+
+//HELPER FUNCTIONS:
+
+float GetCrest(int x, int y)
+{
+    float centre = GetHeight(x, y);
+
+    float left = GetHeight((x - 1) & xMax, y);
+    float right = GetHeight((x + 1) & xMax, y);
+    float up = GetHeight(x, (y - 1) & yMax);
+    float down = GetHeight(x, (y + 1) & yMax);
+
+    //positive values for crest, negative for trough
+    //return ((centre - left) + (centre - right) + (centre - up) + (centre - down)) / 4.0 / gridSize;
+    return centre - ((left + right + up + down) / 4.0);
+}
+float3 CalculateNormal(int x, int y)
+{
+    //DUPLICATE CODE:
+    float left = GetHeight((x - 1) & xMax, y);
+    float right = GetHeight((x + 1) & xMax, y);
+    float up = GetHeight(x, (y - 1) & yMax);
+    float down = GetHeight(x, (y + 1) & yMax);
+
+    //Method 1: cross (i think theres something i need to do with proper normalising)
+    // Vector3 va = new Vector3(2 * gridSize, (right - left), 0);
+    // Vector3 vb = new Vector3(0, (up - down), -2 * gridSize);
+    // return Vector3.Normalize(Vector3.Cross(va, vb));
+
+    //Method 2: diff
+    return normalize(float3((left - right) / (2 * gridSize), 1, (up - down) / (2 * gridSize)));
+}
+float2 GetGradient(int x, int y)
+{
+    float3 normal = CalculateNormal(x, y);
+    return float2(-normal.x, -normal.z);
+}
+
+float GradientToAngle(float2 gradient)
+{
+    return asin(length(gradient));
+}
+
+float GradientToHeight(float2 gradient)
+{
+    return tan(GradientToAngle(gradient)) * gridSize;
+}
+
+float GetExcess(int x, int y, float crest, float2 gradient)
+{
+    float excess = 0;
+
+    if (crest > 0)
+    {
+        //putting this outside the if makes more sweeping curves (NICE!), but also makes it work more slowly
+        
+        //float lowestPointDiff = crest + GradientToHeight(gradient); //faster but looks crazy before it is finished
+        float lowestPointDiff = max(GradientToHeight(gradient), crest); //nicer looking
+
+        if (lowestPointDiff > slopeThreshold)
+        {
+            //0.5* is optional theoretically (but not really - it creates diamond artifacts until it is finished)
+            excess = 0.5 * (lowestPointDiff - (slopeThreshold));
+          }      
+    }
+    else //for negative crests
+    {
+        //it works fine without negative crests, im just experimenting with removing diamond artifacts (this helps)
+        
+
+        //float highestPointDiff = -crest - GradientToHeight(gradient); //faster but looks crazy before it is finished
+        float highestPointDiff = min(-GradientToHeight(gradient), -crest); //nicer looking
+
+        if (highestPointDiff > slopeThreshold)
+        {
+            //0.5* is optional theoretically (but not really - it creates diamond artifacts until it is finished)
+            excess = 0.5 * -(highestPointDiff - (slopeThreshold));
+        }    
+    }
+
+    //+tive excess means current cell is too tall
+    //-tive excess means current cell is too deep
+    return excess;
+    //return min(sandMapIn[y + x * yResolution], excess);
+}
+
+
+float GetDirectionalAmount(uint x, uint y, float2 dir)
+{
+    float crest = GetCrest(x, y);
+    float2 gradient = GetGradient(x, y);
+
+    //TODO what the fuck does this do? why is this here?
+    //I think its to determine where the flux should be coming from? idk
+    if (gradient.x == 0 && gradient.y == 0) return 0;
+    else
+    {
+        float excess = GetExcess(x, y, crest, gradient);
+        gradient = normalize(gradient);
+
+        if (excess == 0) return 0;
+        else
+        {
+            // float directionalComponent = max(0, sign(excess) * -dot(gradient, dir));
+
+            // return directionalComponent * excess;
+
+            //TODO wtf is going on with spreadamount and spreadamount2 here? was this for debugging or what?
+            //experimental:
+            float directionalComponent;
+            if (dir.y == 0)
+            {
+                directionalComponent = spreadAmount * abs(gradient.y);
+            }
+            else if (dir.x == 0)
+            {
+                directionalComponent = spreadAmount * abs(gradient.x);
+            }
+            directionalComponent += spreadAmount2 * max(0, sign(excess) * -dot(gradient, dir));
+
+            return directionalComponent * excess;            
+        }
+    }
+}
+
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    //TODO: consider for gpu to not change adjacent cells during this step,
+    //instead, for crests as an example:
+    //remove appropriate excess from crest point in it's step
+    //lower points get 1/4  of the excess from cells around them
+
+    uint2 left = uint2((id.x - 1) & xMax, id.y);
+    uint2 right = uint2((id.x + 1) & xMax, id.y);
+    uint2 up = uint2(id.x, (id.y - 1) & yMax);
+    uint2 down = uint2(id.x, (id.y + 1) & yMax);
+
+
+    float flux = 0;
+
+       
+
+    float crest = GetCrest(id.x, id.y);
+    //float crest = clamp(GetCrest(id.x, id.y), -crestRoughness * slopeThreshold, crestRoughness * slopeThreshold);
+    float2 gradient = GetGradient(id.x, id.y);
+    float excess = GetExcess(id.x, id.y, crest, gradient);
+
+    float diamondCorrection = 1;
+    if (gradient.x == 0 && gradient.y == 0) diamondCorrection = 1;
+    else
+    {
+        //pair this with normalizing gradient in GetDirectionalAmount
+        float2 gn = normalize(gradient);
+        diamondCorrection = (abs(gn.x)+abs(gn.y)); //this gives perfectly round piles
+
+        //diamondCorrection = (abs(gradient.x)+abs(gradient.y)); //but this preserves the total amount of sand
+    }
+    flux += -excess * diamondCorrection;
+
+    flux += GetDirectionalAmount(left.x, left.y, float2(1, 0));
+    flux += GetDirectionalAmount(right.x, right.y, float2(-1, 0));
+    flux += GetDirectionalAmount(up.x, up.y, float2(0, 1));
+    flux += GetDirectionalAmount(down.x, down.y, float2(0, -1));
+
+
+    AddSand(id.x, id.y, flux);
+}

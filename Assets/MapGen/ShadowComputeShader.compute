@@ -1,0 +1,41 @@
+﻿#pragma kernel CSMain
+
+#define PI 3.14159265358979323846
+
+RWStructuredBuffer<float> heightMap;
+RWStructuredBuffer<float> shadow;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float SHADOW_SLOPE;
+
+//float windVector = 1;
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    //0 is no shadow, anything above means shadow
+    int x = id.x;
+    int y = id.y;
+
+    //to save performance, assume that if current tile has been determined to be in shadow, that all tiles in its shadow are also already in shadow
+    if (shadow[x + y * xResolution] == 0) 
+    {
+        float h = heightMap[x + y * xResolution];
+        if (h <= 0) return;
+
+        //float hs = max(h, max(h, shadow[(x - 1) & xMax + y * xResolution]) - SHADOW_SLOPE);
+        float hs = h;
+
+        while (hs >= heightMap[x + y * xResolution])
+        {
+            shadow[x + y * xResolution] = (hs == h) ? 0 : hs;
+            hs -= SHADOW_SLOPE;
+            x = (x + 1) & xMax;
+        }
+    }
+}

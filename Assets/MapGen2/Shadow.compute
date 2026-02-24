@@ -1,0 +1,101 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#define PI 3.14159265358979323846
+
+RWStructuredBuffer<float> heightMapIn;
+// RWStructuredBuffer<float> bedrockMapIn;
+// RWStructuredBuffer<float> sandMapIn;
+RWStructuredBuffer<float2> gradientMapIn;
+RWStructuredBuffer<float2> windMapIn;
+RWStructuredBuffer<float> shadowMapOut;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float gridSize;
+
+float2 universalWindVector;
+
+bool useWindField;
+
+
+
+
+float InverseLerp(float a, float b, float t)
+{
+    return clamp((t - a) / (b - a), 0, 1);
+}
+
+// float GetHeight(float2 pos)
+// {
+//     uint2 topLeft = uint2(floor(pos.x), floor(pos.y));
+//     uint2 topRight = uint2(ceil(pos.x), floor(pos.y));
+//     uint2 bottomLeft = uint2(floor(pos.x), floor(pos.y));
+//     uint2 bottomRight = uint2(ceil(pos.x), floor(pos.y));
+
+//     float height = 0;
+//     float sum = 0;
+//     sum += clamp(1 - distance(pos, topLeft), 0, 1);
+//     height += heightMapIn[topLeft.y + topLeft.x * yResolution] * clamp(1 - distance(pos, topLeft), 0, 1);
+//     sum += clamp(1 - distance(pos, topRight), 0, 1);
+//     height += heightMapIn[topRight.y + topRight.x * yResolution] * clamp(1 - distance(pos, topRight), 0, 1);
+//     sum += clamp(1 - distance(pos, bottomLeft), 0, 1);
+//     height += heightMapIn[bottomLeft.y + bottomLeft.x * yResolution] * clamp(1 - distance(pos, bottomLeft), 0, 1);
+//     sum += clamp(1 - distance(pos, bottomRight), 0, 1);
+//     height += heightMapIn[bottomRight.y + bottomRight.x * yResolution] * clamp(1 - distance(pos, bottomRight), 0, 1);
+
+//     return height / sum;
+// }
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float minAngle = 5;
+    float maxAngle = 15;
+
+    //maybe do this outside of compute shader???
+    float2 vec;
+    if (useWindField) vec = normalize(windMapIn[id.y + id.x * yResolution]);
+    else vec = normalize(universalWindVector);
+
+
+
+    float2 origin = float2(id.x, id.y);
+    float originHeight = heightMapIn[origin.y + origin.x * yResolution];
+
+
+
+    //an idea i had involved finding the maximum, not capping it at 1
+    //measure the height difference between top of shadow and the height
+
+    
+    //gets magnitude of the gradient in the direction of the wind
+    float b = dot(gradientMapIn[origin.y + origin.x * yResolution], -vec);
+   
+        //asin because gradient represents perpendicular direction (flat terrain has magnitude 0)
+        float angle = asin(b);
+
+        shadowMapOut[origin.y + origin.x * yResolution] = InverseLerp(minAngle, maxAngle, (angle / PI * 180));
+        shadowMapOut[origin.y + origin.x * yResolution] = tan(angle);
+
+        for (int i = 1; i < 100; i++)
+        {
+            float2 pos = origin - i * vec;
+            uint2 posIndex = uint2((int)round(pos.x) & xMax, (int)round(pos.y) & yMax);
+            float posHeight = heightMapIn[posIndex.y + posIndex.x * yResolution];
+
+            float tangent = (posHeight - originHeight) / (gridSize * distance(pos, origin));
+            //float tangent = (posHeight - originHeight) / (gridSize * distance(round(pos), origin) + distance(pos, round(pos)));
+            
+            if (tangent > shadowMapOut[origin.y + origin.x * yResolution]) shadowMapOut[origin.y + origin.x * yResolution] = tangent;
+            if (tangent >= tan(maxAngle * PI / 180)) break;
+        }
+
+        //inverse lerp between 10 and 15 degrees
+        shadowMapOut[origin.y + origin.x * yResolution] = InverseLerp(minAngle, maxAngle, atan(shadowMapOut[id.y + id.x * yResolution]) / PI * 180);
+
+}

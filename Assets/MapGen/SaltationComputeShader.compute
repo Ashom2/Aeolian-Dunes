@@ -1,0 +1,271 @@
+﻿#pragma kernel CSMain
+
+#define PI 3.14159265358979323846
+
+RWStructuredBuffer<float> heightMapIn;
+RWStructuredBuffer<float> heightMapOut;
+
+RWStructuredBuffer<float> shadow;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float2 seed;
+float2 xSeed;
+float2 ySeed;
+
+float avalancheHeightThreshold;
+float depositAmount;
+int saltationDistance;
+
+float SHADOW_SLOPE;
+
+bool OpenEnded = false;
+
+float WindSpeedUpFactor;
+float NonlinearFactor;
+
+float averageHeight = 0;
+
+float random(float2 p)
+{
+    //large multiplier may cause issues
+    return frac(tan(dot(p, float2(12.989, 78.233))) * 758.5423123);
+    //return frac(sin(dot(p, float2(12.989872647815, 78.2339565674))) * 43758.5453123);
+}
+
+// float3 CalculateDiscreteNormal(uint3 id)
+// {
+//     float x0 = heightMapIn[id.y + (id.x - 1) * yResolution];
+//     float x1 = heightMapIn[id.y + (id.x + 1) * yResolution];
+
+//     float y0 = heightMapIn[(id.y - 1) + id.x * yResolution];
+//     float y1 = heightMapIn[(id.y + 1) + id.x * yResolution];
+
+//     float gridSpacing = 1;
+
+//     float3 normal = normalize(float3((x0 - x1) / (2 * gridSpacing), 1, (y0 - y1) / (2 * gridSpacing)));
+// }
+
+float Elev(int w, int x)
+{
+    return heightMapOut[x + w * xResolution];
+}
+
+float Shadow(int w, int x)
+{
+    return shadow[x + w * xResolution];
+}
+
+//Von Neumann Deterministic
+int Upslope(int wCenter, int xCenter, out int wSteep, out int xSteep)
+{
+    //    2
+    //  1   4
+    //    3
+    int wLeft, wRight, xUp, xDown;
+    wSteep = wCenter; xSteep = xCenter;
+    float h = Elev(wCenter, xCenter);
+
+    xUp = (xCenter - 1) & xMax;
+    if ((!OpenEnded || (xCenter > 0)) && ((Elev(wCenter, xUp) - h) >= avalancheHeightThreshold))
+    {
+        xSteep = xUp; return 2;
+    }
+    wRight = (wCenter + 1) & yMax;
+    if ((Elev(wRight, xCenter) - h) >= avalancheHeightThreshold)
+    {
+        wSteep = wRight; return 2;
+    }
+    wLeft = (wCenter - 1) & yMax;
+    if ((Elev(wLeft, xCenter) - h) >= avalancheHeightThreshold)
+    {
+        wSteep = wLeft; return 2;
+    }
+    xDown = (xCenter + 1) & xMax;
+    if ((!OpenEnded || (xCenter != xMax)) && ((Elev(wCenter, xDown) - h) >= avalancheHeightThreshold))
+    {
+        xSteep = xDown; return 2;
+    }
+    return 0;
+}
+
+int Downslope(int wCenter, int xCenter, out int wSteep, out int xSteep)
+{
+    //    2
+    //  4   1
+    //    3
+    int wLeft, wRight, xUp, xDown;
+    wSteep = wCenter; xSteep = xCenter;
+    float h = Elev(wCenter, xCenter);
+
+    xDown = (xCenter + 1) & xMax;
+    if ((!OpenEnded || (xCenter != xMax)) && ((h - Elev(wCenter, xDown)) >= avalancheHeightThreshold))
+    {
+        xSteep = xDown; return 2;
+    }
+    wRight = (wCenter + 1) & yMax;
+    if ((h - Elev(wRight, xCenter)) >= avalancheHeightThreshold)
+    {
+        wSteep = wRight; return 2;
+    }
+    wLeft = (wCenter - 1) & yMax;
+    if ((h - Elev(wLeft, xCenter)) >= avalancheHeightThreshold)
+    {
+        wSteep = wLeft; return 2;
+    }
+    xUp = (xCenter - 1) & xMax;
+    if ((!OpenEnded || (xCenter > 0)) && ((h - Elev(wCenter, xUp)) >= avalancheHeightThreshold))
+    {
+        xSteep = xUp; return 2;
+    }
+    return 0;
+}
+
+void erodeGrain(int w, int x, float amount)
+{
+    int wSteep, xSteep;
+    while (Upslope(w, x, wSteep, xSteep) >= 2)
+    {
+        // if (openEnded && (((xSteep == xMax) && (x == 0)) || ((xSteep == 0) && (x == xMax))))
+        //     return 0;  // erosion happens off-field
+        w = wSteep;
+        x = xSteep;
+    }
+    //prevents it from being below zero
+    heightMapOut[x + w * xResolution] -= amount;
+    if (heightMapOut[x + w * xResolution] < 0)
+    {
+        //deposit amount at origin
+        heightMapOut[x + w * xResolution] = 0;
+    }
+
+    float h = Elev(w, x);
+    float hs;
+    // if (openEnded && (x == 0))
+    //     hs = h;
+    //else
+    //{
+        int xs = (x - 1) & xMax;
+        hs = max(h, max(Elev(w, xs), Shadow(w, xs)) - SHADOW_SLOPE);
+    //}
+    while (hs >= (h = ((float)Elev(w, x))))
+    {
+        shadow[x + w * xResolution] = (hs == h) ? 0 : hs;
+        hs -= SHADOW_SLOPE;
+        x = (x + 1) & xMax;
+        // if (openEnded && (x == 0))
+        //     return 0;
+    }
+    while (Shadow(w, x) > 0)
+    {
+        shadow[x + w * xResolution] = 0;
+        x = (x + 1) & xMax;
+        // if (openEnded && (x == 0))
+        //     return 0;
+        hs = h - SHADOW_SLOPE;
+        if (Shadow(w, x) > hs)
+            while (hs >= (h = ((float)Elev(w, x))))
+            {
+                shadow[x + w * xResolution] = (hs == h) ? 0 : hs;
+                hs -= SHADOW_SLOPE;
+                x = (x + 1) & xMax;
+                // if (openEnded && (x == 0))
+                //     return 0;
+            }
+    }
+}
+
+void depositGrain(int w, int x, float amount)
+{
+    int xSteep, wSteep;
+    while (Downslope(w, x, wSteep, xSteep) >= 2)
+    {
+        // if (openEnded && (((xSteep == xMax) && (x == 0)) || ((xSteep == 0) && (x == xMax))))
+        //     break;  // deposit happens at boundary, to keep grains from rolling off
+        w = wSteep;
+        x = xSteep;
+    }
+    heightMapOut[x + w * xResolution] += amount;
+
+    float h = Elev(w, x);
+    float hs;
+    // if (openEnded && (x == 0))
+    //     hs = h;
+    // else
+    // {
+        int xs = (x - 1) & xMax;
+        hs = max(h, max(Elev(w, xs), Shadow(w, xs)) - SHADOW_SLOPE);
+    //}
+    while (hs >= (h = ((float)Elev(w, x))))
+    {
+        shadow[x + w * xResolution] = (hs == h) ? 0 : hs;
+        hs -= SHADOW_SLOPE;
+        x = (x + 1) & xMax;
+        // if (openEnded && (x == 0))
+        //     return 0;
+    }
+}
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float pSand = 0.6;
+    float pNoSand = 0.4;
+    int saltationLeap;
+
+    // int x = xMax - id.x;
+    // int y = yMax - id.y;
+
+    int x = floor(random(float2(id.x, id.y) + xSeed) * xResolution);
+    int w = floor(random(float2(id.x, id.y) + ySeed) * yResolution);
+
+
+    float h = Elev(w, x);
+
+    if (h <= 0) return;
+    if (Shadow(w, x) > 0) return;
+
+    erodeGrain(w, x, min(h, depositAmount));
+    //heightMapOut[x + w * xResolution] += avalancheHeightThreshold / 2;
+
+    int i = 0;
+    while (true)
+    {
+        //if (i < 6)
+        //{
+        float dh = h - averageHeight;
+        if (dh > 0) saltationLeap = saltationDistance + round(WindSpeedUpFactor * dh + NonlinearFactor * dh * dh);
+        else saltationLeap = saltationDistance + round(WindSpeedUpFactor * dh);
+
+        //if (round(WindSpeedUpFactor * dh + NonlinearFactor * dh * dh) >= 1) heightMapOut[x + w * xResolution] += 500;
+        //if (saltationDistance + round(WindSpeedUpFactor * dh + NonlinearFactor * dh * dh) > saltationDistance) heightMapOut[x + w * xResolution] += 500;
+
+        x = (x + saltationLeap) & xMax;
+
+        if (Shadow(w, x) > 0)
+        {
+            depositGrain(w, x, min(h, depositAmount));
+            break;
+        }
+        if (random(float2(x / (float)xMax, w / (float)yMax) + seed + float2(i, i)) <= (h > 0 ? pSand : pNoSand))
+        {
+            depositGrain(w, x, min(h, depositAmount));
+            break;
+        }
+        h = heightMapOut[x + w * xResolution];
+        i++;
+        //}
+        //else break;
+    }
+
+    
+
+
+
+    //random
+    //heightMapOut[id.y + id.x * yResolution] = random(float2(x, y) + seed);
+}

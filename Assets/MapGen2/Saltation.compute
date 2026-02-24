@@ -1,0 +1,391 @@
+﻿#pragma kernel CSMain
+
+//RWStructuredBuffer<float> bedrockMapIn;
+//RWStructuredBuffer<float> sandMapIn;
+RWStructuredBuffer<float> sandMapOut;
+//RWStructuredBuffer<float> vegetationMapIn;
+
+RWStructuredBuffer<float2> windMapIn;
+RWStructuredBuffer<float> shadowMapIn;
+
+RWStructuredBuffer<uint> mutex;
+RWStructuredBuffer<uint> mutex2;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float2 seed;
+float2 erodeSeed;
+float2 depositSeed;
+float2 xSeed;
+float2 ySeed;
+
+float2 universalWindVector;
+
+float slopeThreshold;
+float depositAmount;
+
+float Random(float2 p)
+{
+    //large multiplier may cause issues
+    return clamp(frac(tan(dot(p, float2(12.989, 78.233))) * 758.5423123), 0, 1);
+    //return frac(sin(dot(p, float2(12.989872647815, 78.2339565674))) * 43758.5453123);
+}
+
+float ProbabilityFromSand(float sand)
+{
+    if (sand > 0) return 0.6;
+    else return 0.4;
+}
+
+// float ProbabilityFromVegetation(float vegetation)
+// {
+//     return 1 - vegetation;
+// }
+
+void WaitForMutex(uint2 id)
+{
+    if (mutex[id.y + id.x * yResolution] == 0)
+    {
+        while (true)
+        {
+            uint original = 1;
+            InterlockedCompareExchange(mutex[id.y + id.x * yResolution], 0, 1, original);
+            if (original == 0) // this means the exchange succeeded! you own the "mutex"
+            break; // mutex[x, y] now equals 1
+        }
+    }
+}
+
+void ResetMutex(uint2 id)
+{
+    uint dummy;
+    //InterlockedExchange(mutex[id.y + id.x * yResolution], 0, dummy);
+    InterlockedCompareExchange(mutex[id.y + id.x * yResolution], 1, 0, dummy);
+}
+
+void MutexAdd(uint2 id, float amount)
+{
+    //causes race condition problems
+    //sandMapOut[id.y + id.x * yResolution] -= amount;
+
+    WaitForMutex(id);
+    if (mutex[id.y + id.x * yResolution] == 1) sandMapOut[id.y + id.x * yResolution] += amount;
+    ResetMutex(id);
+}
+
+float GetSlope(uint2 from, uint2 to)
+{
+    return (sandMapOut[to.y + to.x * yResolution] - sandMapOut[from.y + from.x * yResolution]) / distance(from, to);
+}
+
+int Upslope(uint2 id, float centreHeight, out uint2 nextCellPos, out float nextCellHeight, out float difference, float2 seed)
+{
+    //this will cause problems! - because if it reads an entry before
+    //float centreHeight = sandMapOut[id.y + id.x * yResolution];
+    nextCellPos = id;
+    nextCellHeight = centreHeight;
+
+    float sum = 0;
+
+    uint2 up = uint2(id.x, (id.y - 1) & yMax);
+    float upHeight = sandMapOut[up.y + up.x * yResolution];
+    float upProbability = 0;
+    if (upHeight >= centreHeight + slopeThreshold)
+    {
+        upProbability = GetSlope(id, up);
+        sum += upProbability;
+    }
+
+    uint2 down = uint2(id.x, (id.y + 1) & yMax);
+    float downHeight = sandMapOut[down.y + down.x * yResolution];
+    float downProbability = 0;
+    if (downHeight >= centreHeight + slopeThreshold)
+    {
+        downProbability = GetSlope(id, down);
+        sum += downProbability;
+    }
+
+    uint2 left = uint2((id.x - 1) & xMax, id.y);
+    float leftHeight = sandMapOut[left.y + left.x * yResolution];
+    float leftProbability = 0;
+    if (leftHeight >= centreHeight + slopeThreshold)
+    {
+        leftProbability = GetSlope(id, left);
+        sum += leftProbability;
+    }
+
+    uint2 right = uint2((id.x + 1) & xMax, id.y);
+    float rightHeight = sandMapOut[right.y + right.x * yResolution];
+    float rightProbability = 0;
+    if (rightHeight >= centreHeight + slopeThreshold)
+    {
+        rightProbability = GetSlope(id, right);
+        sum += rightProbability;
+    }
+
+
+
+    if (sum > 0)
+    {
+        float r = Random(id + seed) * sum;
+        float cumulativeProbability = upProbability;
+
+        if (cumulativeProbability > r)
+        {
+            nextCellPos = up;
+            nextCellHeight = upHeight;
+        }
+        else
+        {
+            cumulativeProbability += downProbability;
+            if (cumulativeProbability > r)
+            {
+                nextCellPos = down;
+                nextCellHeight = downHeight;
+            } 
+            else
+            {
+                cumulativeProbability += leftProbability;
+                if (cumulativeProbability > r) 
+                {
+                    nextCellPos = left;
+                    nextCellHeight = leftHeight;
+                }
+                else
+                {
+                    nextCellPos = right;
+                    nextCellHeight = rightHeight;
+                }
+            }
+        }
+        return 1;
+    }
+    else
+    {
+        difference = slopeThreshold;
+        //difference = max(max(upHeight, downHeight), max(leftHeight, rightHeight)) - slopeThreshold - centreHeight;
+        return 0;
+    }
+}
+
+int Downslope(uint2 id, float centreHeight, out uint2 nextCellPos, out float nextCellHeight, out float difference, float2 seed)
+{
+    //this will cause problems! - because if it reads an entry before
+    //float centreHeight = sandMapOut[id.y + id.x * yResolution];
+    nextCellPos = id;
+    nextCellHeight = centreHeight;
+
+    float sum = 0;
+
+    uint2 up = uint2(id.x, (id.y - 1) & yMax);
+    float upHeight = sandMapOut[up.y + up.x * yResolution];
+    float upProbability = 0;
+    if (upHeight <= centreHeight - slopeThreshold)
+    {
+        upProbability = GetSlope(up, id);
+        sum += upProbability;
+    }
+
+    uint2 down = uint2(id.x, (id.y + 1) & yMax);
+    float downHeight = sandMapOut[down.y + down.x * yResolution];
+    float downProbability = 0;
+    if (downHeight <= centreHeight - slopeThreshold)
+    {
+        downProbability = GetSlope(down, id);
+        sum += downProbability;
+    }
+
+    uint2 left = uint2((id.x - 1) & xMax, id.y);
+    float leftHeight = sandMapOut[left.y + left.x * yResolution];
+    float leftProbability = 0;
+    if (leftHeight <= centreHeight - slopeThreshold)
+    {
+        leftProbability = GetSlope(left, id);
+        sum += leftProbability;
+    }
+
+    uint2 right = uint2((id.x + 1) & xMax, id.y);
+    float rightHeight = sandMapOut[right.y + right.x * yResolution];
+    float rightProbability = 0;
+    if (rightHeight <= centreHeight - slopeThreshold)
+    {
+        rightProbability = GetSlope(right, id);
+        sum += rightProbability;
+    }
+
+
+
+
+    if (sum > 0)
+    {
+        float r = Random(id + seed) * sum;
+        float cumulativeProbability = upProbability;
+
+        if (cumulativeProbability > r)
+        {
+            nextCellPos = up;
+            nextCellHeight = upHeight;
+        }
+        else
+        {
+            cumulativeProbability += downProbability;
+            if (cumulativeProbability > r)
+            {
+                nextCellPos = down;
+                nextCellHeight = downHeight;
+            } 
+            else
+            {
+                cumulativeProbability += leftProbability;
+                if (cumulativeProbability > r) 
+                {
+                    nextCellPos = left;
+                    nextCellHeight = leftHeight;
+                }
+                else
+                {
+                    nextCellPos = right;
+                    nextCellHeight = rightHeight;
+                }
+            }
+        }
+        return 1;
+    }
+    else
+    {
+        difference = slopeThreshold;
+        //difference = min(min(upHeight, downHeight), min(leftHeight, rightHeight)) + slopeThreshold - centreHeight;
+        return 0;
+    } 
+}
+
+void Erode(uint2 id, float amount)
+{
+    WaitForMutex(id);
+    if (mutex[id.y + id.x * yResolution] == 1)
+    {
+        while (amount > 0)
+        {
+            uint2 currentCell = id;
+            float centreHeight = sandMapOut[id.y + id.x * yResolution];
+            uint2 nextCell;
+            float nextCellHeight;
+            float difference = slopeThreshold;
+
+            int i = 0;
+            while (Upslope(currentCell, centreHeight, nextCell, nextCellHeight, difference, erodeSeed + i) == 1)
+            {
+            currentCell = nextCell;
+            centreHeight = nextCellHeight;
+            i++;
+            }
+            difference = min(difference, amount);
+            if (i == 0) sandMapOut[currentCell.y + currentCell.x * yResolution] -= difference;
+            else MutexAdd(currentCell, -difference);
+            amount -= difference;
+        }
+    }
+    ResetMutex(id);
+}
+
+void Deposit(uint2 id, float amount)
+{
+    WaitForMutex(id);
+    if (mutex[id.y + id.x * yResolution] == 1)
+    {
+        while (amount > 0)
+        {
+            uint2 currentCell = id;
+            float centreHeight = sandMapOut[id.y + id.x * yResolution];
+            uint2 nextCell;
+            float nextCellHeight;
+            float difference = slopeThreshold;
+
+            int i = 0;
+            while (Downslope(currentCell, centreHeight, nextCell, nextCellHeight, difference, depositSeed + i) == 1)
+            {
+            currentCell = nextCell;
+            centreHeight = nextCellHeight;
+            i++;
+            }
+            difference = min(difference, amount);
+            if (i == 0) sandMapOut[currentCell.y + currentCell.x * yResolution] += difference;
+            else MutexAdd(currentCell, difference);
+            amount -= difference;
+        }
+    }
+    ResetMutex(id);
+}
+
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    //just slithering (looks like it goes towards +tve x because it takes from behind)
+    //sandMapOut[id.y + id.x * yResolution] = sandMapOut[id.y + ((id.x + 1) & xMax) * yResolution];
+    
+    // //must only happen once, not randomly
+    // //MutexAdd(id.xy, sandMapOut[id.y + id.x * yResolution]);
+
+    int x = floor(Random(float2(id.x, id.y) + xSeed) * xResolution);
+    int y = floor(Random(float2(id.x, id.y) + ySeed) * yResolution);
+
+
+    uint2 origin = uint2(x, y);
+    float originHeight = sandMapOut[origin.y + origin.x * yResolution];
+
+    if (originHeight <= 0) return;
+    if (shadowMapIn[origin.y + origin.x * yResolution] > 0) return;
+
+    
+
+    Erode(origin, depositAmount);
+
+    float2 pos = origin;
+    int2 posIndex = origin;
+
+    uint i = 0;
+    while (true)
+    {       
+        pos += windMapIn[posIndex.y + posIndex.x * yResolution];
+        posIndex = uint2((int)round(pos.x) & xMax, (int)round(pos.y) & yMax);
+
+        float sand = sandMapOut[posIndex.y + posIndex.x * yResolution];
+        //float vegetation = vegetationMapIn[posIndex.y + posIndex.x * yResolution];
+        float shadow = shadowMapIn[posIndex.y + posIndex.x * yResolution];
+
+        //float depositProbability = shadow + ProbabilityFromSand(sand) + ProbabilityFromVegetation(vegetation);
+        float depositProbability = shadow + ProbabilityFromSand(sand);
+        //float depositProbability = 1;
+        float random = Random(float2(i + origin.x / (float)xMax, i + origin.y / (float)yMax) + seed);
+        if (random <= depositProbability)
+        {
+            Deposit(posIndex, depositAmount);
+            break;
+        }
+
+        //if (i > 10) break;
+
+        i++;
+    }
+
+
+
+
+
+
+
+
+
+
+    // if (id.x == 0 && id.y == 0)
+    // {
+    //     Deposit(uint2(32, 32), 20);
+    // }
+
+    // Deposit(id.xy, 20);
+}

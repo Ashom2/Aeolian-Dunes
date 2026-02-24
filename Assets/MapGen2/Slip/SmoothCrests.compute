@@ -1,0 +1,200 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#define PI 3.14159265358979323846
+
+//do we need heightMapIn? or is it more efficient to calculate here?
+RWStructuredBuffer<float> heightMapIn;
+//RWStructuredBuffer<float> bedrockMapIn;
+RWStructuredBuffer<float> sandMapIn;
+RWStructuredBuffer<float> heightMapOut;
+RWStructuredBuffer<float> sandMapOut;
+
+RWStructuredBuffer<uint> mutex;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float gridSize;
+
+float slopeThreshold;
+float crestRoughness;
+
+float GetHeight(int x, int y)
+{
+    return heightMapIn[y + x * yResolution];
+}
+
+void AddSand(int x, int y, float amount)
+{
+    //TODO check for 0
+    sandMapOut[y + x * yResolution] += amount;
+    heightMapOut[y + x * yResolution] += amount;
+
+    
+    // while (true)
+    // {
+    //     uint original = 1;
+    //     //if mutex = 0, overwrite with 1 and set original to 0
+    //     InterlockedCompareExchange(mutex[y + x * yResolution], 0, 1, original);
+    //     if (original == 0) break;
+    // }
+    // sandMapOut[y + x * yResolution] += amount;
+    // heightMapOut[y + x * yResolution] += amount;
+
+    // uint dummy;
+    // InterlockedExchange(mutex[y + x * yResolution], 0, dummy);
+}
+
+
+
+//HELPER FUNCTIONS:
+
+float GetCrest(int x, int y)
+{
+    float centre = GetHeight(x, y);
+
+    float left = GetHeight((x - 1) & xMax, y);
+    float right = GetHeight((x + 1) & xMax, y);
+    float up = GetHeight(x, (y - 1) & yMax);
+    float down = GetHeight(x, (y + 1) & yMax);
+
+    //positive values for crest, negative for trough
+    //return ((centre - left) + (centre - right) + (centre - up) + (centre - down)) / 4.0 / gridSize;
+    return centre - ((left + right + up + down) / 4.0);
+}
+float3 CalculateNormal(int x, int y)
+{
+    //DUPLICATE CODE:
+    float left = GetHeight((x - 1) & xMax, y);
+    float right = GetHeight((x + 1) & xMax, y);
+    float up = GetHeight(x, (y - 1) & yMax);
+    float down = GetHeight(x, (y + 1) & yMax);
+
+    //Method 1: cross (i think theres something i need to do with proper normalising)
+    // Vector3 va = new Vector3(2 * gridSize, (right - left), 0);
+    // Vector3 vb = new Vector3(0, (up - down), -2 * gridSize);
+    // return Vector3.Normalize(Vector3.Cross(va, vb));
+
+    //Method 2: diff
+    return normalize(float3((left - right) / (2 * gridSize), 1, (up - down) / (2 * gridSize)));
+}
+float2 GetGradient(int x, int y)
+{
+    float3 normal = CalculateNormal(x, y);
+    return float2(-normal.x, -normal.z);
+}
+
+float GetEqualizeAmount(uint x, uint y, uint2 origin, out uint numSides, out bool originAffected)
+{
+    numSides = 0;
+    originAffected = false;
+
+    uint2 left = uint2((x - 1) & xMax, y);
+    uint2 right = uint2((x + 1) & xMax, y);
+    uint2 up = uint2(x, (y - 1) & yMax);
+    uint2 down = uint2(x, (y + 1) & yMax);
+
+    float centreHeight = GetHeight(x, y);
+    float crest = GetCrest(x, y);
+    float2 gradient = GetGradient(x, y);
+    
+
+    float equalizeAmount = 0;
+    //crests
+    if (crest > crestRoughness * slopeThreshold)
+    {
+        if (GetHeight(left.x, left.y) < centreHeight)
+        {
+            if (origin.x == left.x && origin.y == left.y) originAffected = true;
+            numSides++;
+        }
+        if (GetHeight(right.x, right.y) < centreHeight)
+        {
+            if (origin.x == right.x && origin.y == right.y) originAffected = true;
+            numSides++;
+        }
+        if (GetHeight(up.x, up.y) < centreHeight)
+        {
+            if (origin.x == up.x && origin.y == up.y) originAffected = true;
+            numSides++;
+        }
+        if (GetHeight(down.x, down.y) < centreHeight)
+        {
+            if (origin.x == down.x && origin.y == down.y) originAffected = true;
+            numSides++;
+        }
+
+        equalizeAmount = float(numSides)/float(numSides + 1) * (crest - crestRoughness * slopeThreshold);
+        equalizeAmount = min(sandMapIn[y + x * yResolution], equalizeAmount);
+    }
+    //troughs
+    // else if (crest < -crestRoughness * slopeThreshold)
+    // {
+    //     if (GetHeight(left.x, left.y) > centreHeight)
+    //     {
+    //         if (origin.x == left.x && origin.y == left.y) originAffected = true;
+    //         numSides++;
+    //     }
+    //     if (GetHeight(right.x, right.y) > centreHeight)
+    //     {
+    //         if (origin.x == right.x && origin.y == right.y) originAffected = true;
+    //         numSides++;
+    //     }
+    //     if (GetHeight(up.x, up.y) > centreHeight)
+    //     {
+    //         if (origin.x == up.x && origin.y == up.y) originAffected = true;
+    //         numSides++;
+    //     }
+    //     if (GetHeight(down.x, down.y) > centreHeight)
+    //     {
+    //         if (origin.x == down.x && origin.y == down.y) originAffected = true;
+    //         numSides++;
+    //     }
+
+    //     equalizeAmount = float(numSides)/float(numSides + 1) * (crest + crestRoughness * slopeThreshold);
+    // }
+    
+    return equalizeAmount;
+}
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    //TODO: consider for gpu to not change adjacent cells during this step,
+    //instead, for crests as an example:
+    //remove appropriate excess from crest point in it's step
+    //lower points get 1/4  of the excess from cells around them
+
+    uint2 left = uint2((id.x - 1) & xMax, id.y);
+    uint2 right = uint2((id.x + 1) & xMax, id.y);
+    uint2 up = uint2(id.x, (id.y - 1) & yMax);
+    uint2 down = uint2(id.x, (id.y + 1) & yMax);
+
+   
+    uint numSides;
+    bool dummy;
+    float equalizeAmount;
+
+    float flux = 0;
+
+    flux = -GetEqualizeAmount(id.x, id.y, uint2(id.x, id.y), numSides, dummy);
+
+    bool leftAffected;
+    equalizeAmount = GetEqualizeAmount(left.x, left.y, uint2(id.x, id.y), numSides, leftAffected);
+    if (leftAffected) flux += equalizeAmount / float(numSides);
+    bool rightAffected;
+    equalizeAmount = GetEqualizeAmount(right.x, right.y, uint2(id.x, id.y), numSides, rightAffected);
+    if (rightAffected) flux += equalizeAmount / float(numSides);
+    bool upAffected;
+    equalizeAmount = GetEqualizeAmount(up.x, up.y, uint2(id.x, id.y), numSides, upAffected);
+    if (upAffected) flux += equalizeAmount / float(numSides);
+    bool downAffected;
+    equalizeAmount = GetEqualizeAmount(down.x, down.y, uint2(id.x, id.y), numSides, downAffected);
+    if (downAffected) flux += equalizeAmount / float(numSides);
+
+    AddSand(id.x, id.y, flux);
+}

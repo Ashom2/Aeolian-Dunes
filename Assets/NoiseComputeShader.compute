@@ -1,0 +1,51 @@
+﻿#pragma kernel CSMain
+
+#include "Assets/NoiseHLSL.hlsl"
+
+#define PI 3.14159265358979323846
+
+RWStructuredBuffer<float> heightMap;
+
+int xResolution;
+int yResolution;
+
+uint seed;
+int octaves;
+float scale;
+float persistence;
+float lacunarity;
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    //2d tileable noise
+    float x = ((float)id.x + 0.5) / (float)xResolution;
+    float y = ((float)id.y + 0.5) / (float)yResolution;
+
+    float angleX = x * 2 * PI;
+    float angleY = y * 2 * PI;
+
+    float4 coordinates = float4(sin(angleX), cos(angleX), sin(angleY), cos(angleY));
+
+    //heightMap[id.y + id.x * yResolution] = Layered4DNoise(coordinates, seed, scale, octaves, persistence, lacunarity) * 5;
+
+
+    //wiggly line:
+    float offset = 0.1 * sin(4 * PI * y);
+    heightMap[id.y + id.x * yResolution] = 200 * max(0, 0.1 - abs(x + offset - 0.5));
+
+    //waves
+    //heightMap[id.y + id.x * yResolution] = 4 + sin(8 * PI * x) * 2;
+
+    //cone
+    // float radius = 30;
+    // float d = max(0, radius - distance(float2(id.x, id.y), float2(xResolution / 2, yResolution / 2)));
+    // heightMap[id.y + id.x * yResolution] = d;
+
+    //slope
+    // heightMap[id.y + id.x * yResolution] = id.x;
+    // heightMap[10 + 11 * yResolution] = 12;
+
+    //point
+    //heightMap[10 + 10 * yResolution] = 100;
+}

@@ -1,0 +1,127 @@
+﻿#pragma kernel CSMain
+
+#define PI 3.14159265358979323846
+
+RWStructuredBuffer<float> heightMapIn;
+RWStructuredBuffer<float3> normalMapOut;
+RWStructuredBuffer<float2> gradientMapOut;
+RWStructuredBuffer<float2> windMapOut;
+//new shit
+RWStructuredBuffer<float> crestMapOut;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float gridSize;
+
+float windAccelerationFactor = 0.005;
+float averageHeight = 3;
+
+float2 universalWindVector;
+float deviationCoefficient;
+
+
+
+//int radius;
+
+// float GetWeight(int x, int y)
+// {
+//     return 1 / (2 * PI * radius * radius) * exp(-(float)(x * x + y * y) / (float)(2 * radius * radius));
+// }
+
+// float GaussianBlur(uint3 id, int radius)
+// {
+//     float sum = 0;
+//     for (int x = -radius; x <= radius; x++)
+//     {
+//         for (int y = -radius; y <= radius; y++)
+//         {
+//             sum += GetWeight(x, y);
+//         }
+//     }
+
+//     float value = 0;
+//     for (x = -radius; x <= radius; x++)
+//     {
+//         int xPoint = (id.x + x) & xMax;
+
+//         for (int y = -radius; y <= radius; y++)
+//         {
+//             int yPoint = (id.y + y) & yMax;
+
+//             value += heightMapIn[xPoint + yPoint * xResolution] * GetWeight(x, y) / sum;
+//         }
+//     }
+
+//     return value;
+// }
+float GetCrest(uint3 id)
+{
+    //gets sortof the "average height difference" around a cell
+
+    float centre = heightMapIn[id.y + id.x * yResolution];
+
+    float left = heightMapIn[id.y + ((id.x - 1) & xMax) * yResolution];
+    float right = heightMapIn[id.y + ((id.x + 1) & xMax) * yResolution];
+
+    float up = heightMapIn[((id.y - 1) & yMax) + id.x * yResolution];
+    float down = heightMapIn[((id.y + 1) & yMax) + id.x * yResolution];
+
+    //float total = left + right + up + down;
+
+    //positive values for crest, negative for trough
+    //return ((centre - left) + (centre - right) + (centre - up) + (centre - down)) / 4.0 / gridSize;
+    return centre - ((left + right + up + down) / 4.0);
+}
+
+float3 Normal(uint3 id)
+{
+    float left = heightMapIn[id.y + ((id.x - 1) & xMax) * yResolution];
+    float right = heightMapIn[id.y + ((id.x + 1) & xMax) * yResolution];
+
+    float up = heightMapIn[((id.y - 1) & yMax) + id.x * yResolution];
+    float down = heightMapIn[((id.y + 1) & yMax) + id.x * yResolution];
+
+    //better method for rounded gradients
+    return normalize(float3((left - right) / (2 * gridSize), 1, (up - down) / (2 * gridSize)));
+
+
+    
+
+    // float3 va = normalize(float3(2 * gridSize, (right - left), 0));
+    // float3 vb = normalize(float3(0, (up - down), -2 * gridSize));
+
+    // return cross(va, vb);
+}
+
+[numthreads(1, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{    
+    //heightMapOut[id.y + id.x * yResolution] = GaussianBlur(id, radius);
+    
+    float2 wind;
+    float3 normal;
+    float2 gradient;
+
+    wind = universalWindVector * (1 + windAccelerationFactor * (heightMapIn[id.y + id.x * yResolution] - 3));
+    normalMapOut[id.y + id.x * yResolution] = normal = Normal(id);
+    gradientMapOut[id.y + id.x * yResolution] = gradient = float2(-normal.x, -normal.z);
+
+    float slope = length(gradient);
+
+    float2 normalVector;
+    if (dot(float2(gradient.y, -gradient.x), wind) >= 0) normalVector = float2(gradient.y, -gradient.x);
+    else normalVector = float2(-gradient.y, gradient.x);
+    //causes issues with flat terrain
+    //normalVector = normalize(normalVector);
+
+    windMapOut[id.y + id.x * yResolution] = (1 - slope) * wind + slope * deviationCoefficient * normalVector;    
+
+    //no slope version
+    //windMapOut[id.y + id.x * yResolution] = wind + slope * deviationCoefficient * normalVector;   
+
+    crestMapOut[id.y + id.x * yResolution] = GetCrest(id);
+}

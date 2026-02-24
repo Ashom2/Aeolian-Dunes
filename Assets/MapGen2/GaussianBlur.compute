@@ -1,0 +1,82 @@
+﻿#pragma kernel CSMain
+
+#define PI 3.14159265358979323846
+
+RWStructuredBuffer<float> bedrockMapIn;
+RWStructuredBuffer<float> sandMapIn;
+RWStructuredBuffer<float> crestMapIn;
+RWStructuredBuffer<float> heightMapOut;
+
+int xResolution;
+int yResolution;
+
+int xMax;
+int yMax;
+
+float blurStrength;
+float blurThreshold = 0;
+// float GetWeight(int x, int y)
+// {
+//     return 1 / (2 * PI * radius * radius) * exp(-(float)(x * x + y * y) / (float)(2 * radius * radius));
+// }
+
+float GetKernel(int x, int y)
+{
+    if (x==0 && y==0) return blurStrength;
+    else return (1.0-blurStrength) / 8.0;
+}
+
+float kernel[9] = {0.01, 0.01, 0.01,
+                      0.01, 0.92, 0.01,
+                      0.01, 0.01, 0.01};
+
+[numthreads(16, 16, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // int xCentre = id.x;
+    // int yCentre = id.y;
+    
+    //precompute
+    // float sum = 0;
+    // for (int x = -radius; x <= radius; x++)
+    // {
+    //     for (int y = -radius; y <= radius; y++)
+    //     {
+    //         sum += GetWeight(x, y);
+    //     }
+    // }
+    //float strongBlur = 
+
+
+    bool thresholdReached = false;
+    float centreHeight = sandMapIn[id.x + id.y * xResolution] + bedrockMapIn[id.x + id.y * xResolution];
+
+    if (sandMapIn[id.x + id.y * xResolution] > 0)
+    {
+        for (int x = -1; x <= 1; x++)
+        {
+            int xPoint = (id.x + x) & xMax;
+
+            for (int y = -1; y <= 1; y++)
+            {
+                int yPoint = (id.y + y) & yMax;
+
+                float dist = sqrt(x*x + y*y);
+                float pointHeight = sandMapIn[xPoint + yPoint * xResolution] + bedrockMapIn[xPoint + yPoint * xResolution];
+
+                //if (abs(pointHeight-centreHeight) / dist >= blurThreshold) thresholdReached = true;
+
+                heightMapOut[id.x + id.y * xResolution] += GetKernel(x, y) * pointHeight;
+            }
+        }
+
+        //if (thresholdReached) heightMapOut[id.x + id.y * xResolution] = max(0, heightMapOut[id.x + id.y * xResolution] - bedrockMapIn[id.x + id.y * xResolution]);
+        //else heightMapOut[id.x + id.y * xResolution] = sandMapIn[id.x + id.y * xResolution];
+
+        //if (abs(crestMapIn[id.x + id.y * xResolution]) > blurThreshold) heightMapOut[id.x + id.y * xResolution] = max(0, heightMapOut[id.x + id.y * xResolution] - bedrockMapIn[id.x + id.y * xResolution]);
+        //else heightMapOut[id.x + id.y * xResolution] = sandMapIn[id.x + id.y * xResolution];
+
+        heightMapOut[id.x + id.y * xResolution] = max(0, heightMapOut[id.x + id.y * xResolution] - bedrockMapIn[id.x + id.y * xResolution]);
+    }
+    else heightMapOut[id.x + id.y * xResolution] = sandMapIn[id.x + id.y * xResolution] + bedrockMapIn[id.x + id.y * xResolution];
+}
